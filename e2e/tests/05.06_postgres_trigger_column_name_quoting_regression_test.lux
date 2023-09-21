@@ -1,0 +1,63 @@
+[doc A regression test that verifies correct column name quoting on the generated "perform_reordered_op___*" function]
+[include _shared.luxinc]
+
+[invoke setup]
+
+[shell pg_1]
+    [local sql=
+        """
+        CREATE TABLE public."Foo" (
+            id TEXT PRIMARY KEY,
+            "userId" TEXT
+        );
+        CALL electric.electrify('public."Foo"');
+        """]
+    [invoke migrate_pg 20230921 $sql]
+
+[newshell user_1_ws1]
+    -$fail_pattern
+    [invoke start_elixir_test 1]
+    [invoke client_session 1 1]
+
+    !alias Electric.Satellite.{SatRelation, SatRelationColumn, SatOpInsert, SatOpUpdate, SatOpRow}
+
+    """!
+    Satellite.TestWsClient.send_data(conn, %SatRelation{
+      columns: [
+        %SatRelationColumn{name: "id", type: "text", is_nullable: false},
+        %SatRelationColumn{name: "userId", type: "text", is_nullable: true},
+      ],
+      relation_id: 1,
+      schema_name: "public",
+      table_name: "Foo",
+      table_type: :TABLE
+    })
+    """
+    ?$eprompt
+    """!
+    Satellite.TestWsClient.send_data(conn, ProtocolHelpers.transaction("1", DateTime.to_unix(DateTime.utc_now(), :millisecond), [
+        %SatOpInsert{relation_id: 1, row_data: %SatOpRow{nulls_bitmask: <<0::1, 1::1, 0::6>>, values: ["1", ""]}},
+        %SatOpUpdate{relation_id: 1, row_data: %SatOpRow{nulls_bitmask: <<0>>, values: ["1", "test_user"]}},
+    ]))
+    """
+    ?$eprompt
+
+[shell electric]
+    ?ws data received: %Electric.Satellite.SatOpLog\{ops: \[.*\
+        %Electric.Satellite.SatTransOp\{op: \{:insert, %Electric.Satellite.SatOpInsert\{\
+          relation_id: 1, row_data: %Electric.Satellite.SatOpRow\{nulls_bitmask: "@", values: \["1", ""\]\}, tags: \[\]\
+        \}\}\}, \
+        %Electric.Satellite.SatTransOp\{op: \{:update, %Electric.Satellite.SatOpUpdate\{\
+          relation_id: 1, row_data: %Electric.Satellite.SatOpRow\{nulls_bitmask: <<0>>, values: \["1", "test_user"\]\}, old_row_data: nil, tags: \[\]\
+        \}\}\}
+
+    ?Saving transaction \d+ at [0-9/A-F]+ with changes \[\
+      %Electric.Replication.Changes.NewRecord\{relation: \{"public", "Foo"\}, \
+                                               record: %\{"id" => "1", "userId" => nil\}, \
+                                               tags: \[[^]]+\]\}, \
+      %Electric.Replication.Changes.UpdatedRecord\{relation: \{"public", "Foo"\}, \
+                                                   old_record: %\{"id" => "1", "userId" => nil\}, \
+                                                   record: %\{"id" => "1", "userId" => nil\}
+
+[cleanup]
+   [invoke teardown]
